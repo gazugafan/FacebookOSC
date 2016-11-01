@@ -52,7 +52,7 @@ class AlterTableCommand extends Command
                 throw new \RuntimeException("Log file '$logfile' could not be opened. Please check the folder '$dir' exists and has the correct permissions.");
             }
 
-            $files[] = $logfile;
+            $files[] = $logHandle;
         }
 
         if(!$logfile || $input->getOption('stdout'))
