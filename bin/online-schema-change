@@ -10,4 +10,5 @@ if (file_exists($packageAutoloader)) {
 }
 $application = new Application('MySQL Online Schema Change');
 $application->add(new AlterTableCommand());
+$application->add(new CleanupCommand());
 $application->run();
