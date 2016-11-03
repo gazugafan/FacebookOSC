@@ -273,7 +273,7 @@ class OnlineSchemaChangeRefactor
     // but the main flags of interest for cleanup are OSC_FLAGS_DELETELOG,
     // OSC_FLAGS_DROPTABLE.
     //
-    public static function serverCleanup(\PDO $pdo, Psr\Log\LoggerInterface $logger, $flags = 0)
+    public static function serverCleanup(\PDO $pdo, Psr\Log\LoggerInterface $logger, $output_folder = null, $flags = 0)
     {
         self::releaseOscLock($pdo);
 
@@ -283,7 +283,7 @@ class OnlineSchemaChangeRefactor
             $db = $db_and_table['db'];
             $table = $db_and_table['table'];
             $ddl = ''; // empty alter table command as we don't intend to alter
-            $osc = new self($pdo, $logger, $db, $table, $ddl, null);
+            $osc = new self($pdo, $logger, $db, $table, $ddl, $output_folder, $flags);
 
             $osc->forceCleanup();
         }
@@ -367,7 +367,7 @@ class OnlineSchemaChangeRefactor
         $this->flags = $input_flags;
         $this->batchsizeLoad = $input_batchsize_load;
         $this->batchsizeReplay = $input_batchsize_replay;
-        $this->outfileFolder = $input_outfile_folder;
+        $this->outfileFolder = ($input_outfile_folder?(rtrim($input_outfile_folder, '/') . '/'):null);
         $this->backup_user = $input_backup_user;
         $this->longXactTime = $input_long_xact_time;
 
@@ -614,7 +614,7 @@ class OnlineSchemaChangeRefactor
         return $logtext;
     }
 
-    
+
     // Retrieves column names of table being altered and stores in array.
     // Stores PK columns, non-PK columns and all columns in separate arrays.
     protected function initColumnNameArrays()
@@ -787,7 +787,7 @@ class OnlineSchemaChangeRefactor
             // Make sure it ends with / but don't add two /
             $this->outfileFolder = rtrim($this->outfileFolder, '/') . '/';
         }
-
+		
         $this->outfileTable = $this->outfileFolder . '__osc_tbl_' . $this->tablename;
         $this->outfileExcludeIDs = $this->outfileFolder .
             '__osc_ex_' . $this->tablename;
@@ -1217,6 +1217,7 @@ class OnlineSchemaChangeRefactor
         $this->outfileSuffixStart = 1;
 
         do {
+			pcntl_signal_dispatch();
 
             $outfile_suffix++; // start with 1
 
@@ -1456,6 +1457,7 @@ class OnlineSchemaChangeRefactor
         $startTime = time();
 
         while ($this->outfileSuffixEnd >= $suffixStart) {
+			pcntl_signal_dispatch();
 
             $file++;
 
@@ -1617,12 +1619,14 @@ class OnlineSchemaChangeRefactor
     {
         // create temp table for included ids
         $this->createAndInitTemptable(self::TEMP_TABLE_IDS_TO_INCLUDE);
+		pcntl_signal_dispatch();
 
         $query = sprintf('select %s, %s from %s order by %s',
             self::IDCOLNAME, self::DMLCOLNAME,
             self::TEMP_TABLE_IDS_TO_INCLUDE, self::IDCOLNAME);
 
         $result = $this->executeSql('Listing changes to replay',$query);
+		pcntl_signal_dispatch();
 
         $i = 0; // iteration count
         $inserts = 0;
@@ -1634,6 +1638,8 @@ class OnlineSchemaChangeRefactor
         }
 
         while ($row = $result->fetch()) {
+			pcntl_signal_dispatch();
+
             ++$i;
             if (!$single_xact && ($i % $this->batchsizeReplay == 0)) {
                 $this->executeSql('Commiting batch xact for replay', 'COMMIT');
@@ -1642,16 +1648,19 @@ class OnlineSchemaChangeRefactor
             switch ($row[self::DMLCOLNAME]) {
                 case self::DMLTYPE_DELETE :
                     $this->replayDeleteRow($row);
+					pcntl_signal_dispatch();
                     $deletes++;
                     break;
 
                 case self::DMLTYPE_UPDATE :
                     $this->replayUpdateRow($row);
+					pcntl_signal_dispatch();
                     $updates++;
                     break;
 
                 case self::DMLTYPE_INSERT :
                     $this->replayInsertRow($row);
+					pcntl_signal_dispatch();
                     $inserts++;
                     break;
 
@@ -1661,15 +1670,18 @@ class OnlineSchemaChangeRefactor
         }
         if (!$single_xact) {
             $this->executeSql('Commiting batch xact for replay', 'COMMIT');
+			pcntl_signal_dispatch();
         }
 
         $this->appendToExcludedIDs();
+		pcntl_signal_dispatch();
 
         $drop = 'DROP TEMPORARY TABLE ' . self::TEMP_TABLE_IDS_TO_INCLUDE;
         $this->executeSql('Dropping temp table of included ids', $drop);
 
         $output = sprintf("Replayed %d inserts, %d deletes, %d updates\n", $inserts, $deletes, $updates);
         $this->logger->info($output);
+		pcntl_signal_dispatch();
     }
 
     protected function rowCounts()
@@ -1766,6 +1778,8 @@ class OnlineSchemaChangeRefactor
             return;
         }
 
+		$this->logger->notice('Cleaning up...');
+
         $this->executeSql('Unlock tables just in case', 'unlock tables');
 
         $this->executeSql('Rollback in case we are in xact', 'ROLLBACK');
@@ -1779,18 +1793,21 @@ class OnlineSchemaChangeRefactor
             $this->cleanupUpdateTrigger = true;
         }
         if (isset($this->cleanupInsertTrigger)) {
+			$this->logger->info('Cleaning up insert trigger...');
             $drop = sprintf('drop trigger %s.%s', $this->qdbnameq, $this->insertTrigger);
             $this->executeSql('Dropping insert trigger', $drop, $force);
             unset($this->cleanupInsertTrigger);
         }
 
         if (isset($this->cleanupDeleteTrigger)) {
+			$this->logger->info('Cleaning up delete trigger...');
             $drop = sprintf('drop trigger %s.%s', $this->qdbnameq, $this->deleteTrigger);
             $this->executeSql('Dropping delete trigger', $drop, $force);
             unset($this->cleanupDeleteTrigger);
         }
 
         if (isset($this->cleanupUpdateTrigger)) {
+			$this->logger->info('Cleaning up update trigger...');
             $drop = sprintf('drop trigger %s.%s', $this->qdbnameq, $this->updateTrigger);
             $this->executeSql('Dropping update trigger', $drop, $force);
             unset($this->cleanupUpdateTrigger);
@@ -1877,8 +1894,19 @@ class OnlineSchemaChangeRefactor
             }
         }
 
+		//one more attempt, in case blobing was impossible due to permissions...
+		$x = 0;
+		while(true)
+		{
+			$x++;
+			$filename = sprintf('%s.%d', $this->outfileTable, $x);
+			if (!@unlink($filename) && !@unlink($filename . '.loaded'))
+				break;
+		}
+
         $this->releaseOscLock($this->conn); // noop if lock not held
 
+		$this->logger->notice('Successfully cleaned up');
     }
 
     public function forceCleanup()
@@ -1909,28 +1937,38 @@ class OnlineSchemaChangeRefactor
 
             $this->createCopyTable();
             $this->logger->notice("Copy of $this->tablename created at $this->newtablename.");
+			pcntl_signal_dispatch();
+
             // we call init() after the create/alter since we need the new columns
             $this->init();
+			pcntl_signal_dispatch();
             $this->createDeltasTable();
+			pcntl_signal_dispatch();
             $this->createTriggers();
             $this->logger->notice("Triggers created on $this->tablename");
+			pcntl_signal_dispatch();
 
             $this->startSnapshotXact();
+			pcntl_signal_dispatch();
             $this->selectTableIntoOutfile();
             $this->logger->notice("Outfile of $this->tablename complete");
+			pcntl_signal_dispatch();
 
             $this->loadCopyTable();
             $this->logger->notice("Loaded outfile into $this->newtablename");
+			pcntl_signal_dispatch();
 
             $this->replayChanges(false); // false means not in single xact
             $this->logger->notice("Changes against $this->tablename replayed against $this->newtablename");
+			pcntl_signal_dispatch();
 
             $this->swapTables();
+			pcntl_signal_dispatch();
             $this->logger->notice("Moved copy $this->newtablename to $this->tablename");
             $this->logger->notice("$this->tablename has been moved to $this->renametable - Don't forget to remove it.");
             $this->cleanup();
         } catch (Exception $e) {
-            //$this->cleanup();
+            $this->cleanup();
 
             throw $e;
         }

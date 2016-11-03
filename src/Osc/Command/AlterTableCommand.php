@@ -11,6 +11,9 @@ class AlterTableCommand extends Command
 {
     const DEFAULT_USER = 'root';
 
+	private $logger;
+	private $onlineSchemaChange;
+
     protected function configure()
     {
         $this
@@ -19,9 +22,11 @@ class AlterTableCommand extends Command
             ->addArgument('database', InputArgument::REQUIRED, 'The database')
             ->addArgument('table', InputArgument::REQUIRED, 'The table')
             ->addArgument('alter', InputArgument::REQUIRED, 'The alter statement')
+			->addOption('host', 'H', InputOption::VALUE_REQUIRED, 'The host to connect with', 'localhost')
             ->addOption('socket', 's', InputOption::VALUE_REQUIRED, 'The socket to connect with')
             ->addOption('user', 'u', InputOption::VALUE_REQUIRED, 'The user to authenticate with', self::DEFAULT_USER)
             ->addOption('password', 'p', InputOption::VALUE_REQUIRED, 'The password to authenticate with')
+            ->addOption('output-folder', null, InputOption::VALUE_REQUIRED, 'The folder where temporary backup files will be stored (optional)')
             ->addOption('logfile', null, InputOption::VALUE_REQUIRED, 'A filename to log to. Will write output to stdout unless specified')
             ->addOption('stdout', null, InputOption::VALUE_NONE, 'Log to stdout as well as to file. Only required if --logfile is specified')
         ;
@@ -60,7 +65,7 @@ class AlterTableCommand extends Command
             $files[] = STDOUT;
         }
 
-        $logger = new Logger($files, $verbosity[$output->getVerbosity()]);
+        $this->logger = new Logger($files, $verbosity[$output->getVerbosity()]);
 
         if($socket = $input->getOption('socket'))
         {
@@ -68,31 +73,45 @@ class AlterTableCommand extends Command
         }
         else
         {
-            $socket = "host=localhost";
+			$socket = "host=" . $input->getOption('host');
         }
 
         $pdo = new \PDO("mysql:$socket;", $input->getOption('user'), $input->getOption('password'), array(
             \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION
         ));
 
-        $onlineSchemaChange = new \OnlineSchemaChangeRefactor(
+        $this->onlineSchemaChange = new \OnlineSchemaChangeRefactor(
             $pdo,
-            $logger,
+			$this->logger,
             $input->getArgument('database'),
             $input->getArgument('table'),
             $input->getArgument('alter'),
-            null,
+			$input->getOption('output-folder'),
             OSC_FLAGS_ACCEPT_VERSION
         );
 
+		if (!function_exists('pcntl_signal'))
+		{
+			printf("Error, you need to enable the pcntl extension in your php binary, see http://www.php.net/manual/en/pcntl.installation.php for more info%s", PHP_EOL);
+			exit(1);
+		}
+		pcntl_signal(SIGTERM, [$this, 'stopCommand']);
+		pcntl_signal(SIGINT, [$this, 'stopCommand']);
+
         try
         {
-            $onlineSchemaChange->execute();
+			$this->onlineSchemaChange->execute();
         }
         catch(\Exception $e)
         {
-            $logger->error($e->getMessage());
+			$this->logger->error($e->getMessage());
         }
-
     }
+
+	public function stopCommand()
+	{
+		$this->logger->notice("Command aborted by user");
+		$this->onlineSchemaChange->forceCleanup();
+		exit;
+	}
 }
